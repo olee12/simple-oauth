@@ -18,23 +18,28 @@ import (
 )
 
 var googleOauthConfig *oauth2.Config
-var store = sessions.NewCookieStore([]byte("33446a9dcf9ea060a0a6532b166da32f304af0de"))
+var store *sessions.CookieStore
+
 const SessionKey = "sessionid"
+
+var SessionDomain string
 
 func Initialize(v *viper.Viper) {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     v.GetString("auth.google.client-id"),
 		ClientSecret: v.GetString("auth.google.client-secret"),
 		Endpoint:     google.Endpoint,
-		RedirectURL:  "http://me.olee.com:8080/callback",
+		RedirectURL:  v.GetString("auth.redirect-url"),
 		Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email"},
 	}
-	log.Infof("googole oauth config %v",googleOauthConfig)
+	SessionDomain = v.GetString("auth.session-domain")
+	store = sessions.NewCookieStore([]byte(v.GetString("auth.session-secret")))
+	log.Infof("google oauth config %v", googleOauthConfig)
 	port := v.GetString("http.port")
 
 	http.HandleFunc("/", handleMain)
 	http.HandleFunc("/login", handleGoogleLogin)
-	http.HandleFunc("/callback",handleGoogleCallback)
+	http.HandleFunc("/callback", handleGoogleCallback)
 	http.HandleFunc("/secure", loggedIn(secureHandler))
 	http.HandleFunc("/logout", loggedIn(logoutHandler))
 
@@ -43,7 +48,6 @@ func Initialize(v *viper.Viper) {
 
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
-
 
 func main() {
 	v := viper.New()
@@ -54,108 +58,100 @@ func main() {
 	if err != nil {
 		log.Errorf("cannot read viper config, %v", err)
 	}
-	log.Infof("viper keys: %v",v.AllKeys())
+	log.Infof("viper keys: %v", v.AllKeys())
 
 	Initialize(v)
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
-	session, _ := store.Get(r,SessionKey)
-	session.Values["login"] = false
+	session, _ := store.Get(r, SessionKey)
+	log.Infof("is this session new : %v", session.IsNew)
 	session.Options.MaxAge = -1
-	session.Save(r,w)
-	http.Redirect(w,r,"/", http.StatusFound)
+	session.Options.Domain = SessionDomain
+	err := session.Save(r, w)
+	if err != nil {
+		log.Errorf("failed to save session %v", err)
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func loggedIn(fn http.HandlerFunc) http.HandlerFunc {
-
 	return func(w http.ResponseWriter, r *http.Request) {
-		session,_ := store.Get(r,SessionKey)
+		session, _ := store.Get(r, SessionKey)
 		if session.Values["login"] == true {
-			fn(w,r)
-		}else {
-			http.Redirect(w,r,"/",http.StatusTemporaryRedirect)
+			fn(w, r)
+		} else {
+			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		}
 	}
 }
 
-
-
-
 type UserView struct {
-	Email string
-	Name string
+	Email   string
+	Name    string
 	Picture string
 }
+
 func secureHandler(w http.ResponseWriter, r *http.Request) {
-	session, _ := store.Get(r,SessionKey)
+	session, _ := store.Get(r, SessionKey)
 	log.Infof("session %v\n", session)
 	user := UserView{
-		Email:  session.Values["email"].(string),
-		Name:   session.Values["name"].(string),
+		Email:   session.Values["email"].(string),
+		Name:    session.Values["name"].(string),
 		Picture: session.Values["picture"].(string),
 	}
-
-
 	secureTmlp := template.Must(template.ParseFiles("templates/logout.html"))
-
-
 	secureTmlp.Execute(w, &user)
-
 	w.Write([]byte(fmt.Sprintf("%v", session.Values)))
 }
 
 type StateOauth struct {
-	Caller string
+	Caller         string
 	CallerRedirect string
-	Rand []byte
+	Rand           []byte
 }
+
 func generateStateOauthCookie(w http.ResponseWriter, r *http.Request) []byte {
-	var exp = time.Now().Add(24* time.Hour)
+	var exp = time.Now().Add(1 * time.Minute)
 	state := &StateOauth{
 		Caller:         r.Host,
 		CallerRedirect: "",
-		Rand:           make([]byte,16),
+		Rand:           make([]byte, 16),
 	}
 	rand.Read(state.Rand)
 	buff, _ := json.Marshal(&state)
 	stateEnc := base64.URLEncoding.EncodeToString(buff)
-	cookie := http.Cookie{Name:"oauthstate",Value:stateEnc, Expires:exp}
+	cookie := http.Cookie{Name: "oauthstate", Value: stateEnc, Expires: exp, Domain: SessionDomain}
 	http.SetCookie(w, &cookie)
 	return []byte(stateEnc)
 }
-
-
 func handleMain(w http.ResponseWriter, r *http.Request) {
-
 	homeTmlp := template.Must(template.ParseFiles("templates/home.html"))
-	homeTmlp.Execute(w,nil)
+	homeTmlp.Execute(w, nil)
 }
-
 func handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
-	oauthStateBuff := generateStateOauthCookie(w,r)
+	oauthStateBuff := generateStateOauthCookie(w, r)
 	url := googleOauthConfig.AuthCodeURL(string(oauthStateBuff))
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
-
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	oauthState, err := r.Cookie("oauthstate")
 	if err != nil {
-		log.Errorf("cannot find oauthstate cookie, %v",err.Error())
-		http.Redirect(w,r,"/", http.StatusTemporaryRedirect)
+		log.Errorf("cannot find oauthstate cookie, %v", err.Error())
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
-	log.Infof("state from request form [%v]",r.FormValue("state"))
-	log.Infof("state from cookie [%v]",oauthState.Value)
+	log.Infof("state from request form [%v]", r.FormValue("state"))
+	log.Infof("state from cookie [%v]", oauthState.Value)
 	if r.FormValue("state") != oauthState.Value {
 		log.Errorf("oauth state mismatch")
-		http.Redirect(w,r,"/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
 	buff, err := getUserDataFromGoogle(r.FormValue("code"))
 	if err != nil {
 		log.Errorf("cannot get user data from google using code, %v", err)
-		http.Redirect(w,r,"/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
 	log.Infof("response from google oauth %v\n", string(buff))
@@ -163,28 +159,36 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	err = json.Unmarshal(buff, &data)
 	if err != nil {
 		log.Errorf("cannot unmarshal data from google %v", err)
-		http.Redirect(w,r,"/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
 
-	email,_ := data["email"].(string)
-	name,_ := data["name"].(string)
-	picture,_ := data["picture"].(string)
-	id,_ := data["id"].(string)
+	email, _ := data["email"].(string)
+	name, _ := data["name"].(string)
+	picture, _ := data["picture"].(string)
+	id, _ := data["id"].(string)
+
+	if len(email) == 0 || len(id) == 0 {
+		log.Errorf("email or id has length 0")
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		return
+	}
+
 	session, _ := store.Get(r, SessionKey)
 	session.Options = &sessions.Options{
-		Path:     "/",
-		Domain:   "me.olee.com",
-		MaxAge:   24*3600,
+		Path:   "/",
+		Domain: SessionDomain,
+		MaxAge: 1 * 3600,
 	}
 	session.Values["email"] = email
 	session.Values["name"] = name
 	session.Values["login"] = len(email) > 0 || len(name) > 0
 	session.Values["picture"] = picture
 	session.Values["id"] = id
-	session.Save(r,w)
+	session.Save(r, w)
+
 	log.Infof("session info: %v", session.Values)
-	http.Redirect(w,r,"/secure", http.StatusFound)
+	http.Redirect(w, r, "/secure", http.StatusFound)
 }
 
 func getUserDataFromGoogle(code string) ([]byte, error) {
@@ -198,7 +202,7 @@ func getUserDataFromGoogle(code string) ([]byte, error) {
 	}
 	defer response.Body.Close()
 	content, err := ioutil.ReadAll(response.Body)
-	log.Infof("api response: %v",string(content))
+	log.Infof("api response: %v", string(content))
 	return content, err
 }
 
